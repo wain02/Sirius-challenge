@@ -1,48 +1,46 @@
 #!/usr/bin/env python3
 """
-Basic script to send email using SendGrid
-Based on the provided request example
+Script simple para enviar emails usando SendGrid
+Basado en el ejemplo de request proporcionado
 """
 
 import os
 import sys
 from dotenv import load_dotenv
-sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
+from email_service import EmailService
 
-from services.email_service import EmailService
-
-# Load environment variables from .env file
+# Cargar variables de entorno
 load_dotenv()
 
 def main():
-    # Get SendGrid API Key from environment variables
+    # Obtener clave API de SendGrid desde variables de entorno
     API_KEY = os.getenv('SENDGRID_API_KEY')
     
     if not API_KEY:
-        print("Error: SENDGRID_API_KEY not found in environment variables")
-        print("Please check your .env file or set the environment variable")
+        print("❌ Error: SENDGRID_API_KEY no encontrada en las variables de entorno")
+        print("Por favor revisa tu archivo .env o configura la variable de entorno")
         return
     
-    # Initialize email service
+    # Inicializar servicio de email
     email_service = EmailService(API_KEY)
     
-    # Email configuration (from environment variables or defaults)
+    # Configuración del email (desde variables de entorno o valores por defecto)
     from_email = os.getenv('FROM_EMAIL', "mwainwright@fi.uba.ar")
     to_email = os.getenv('TO_EMAIL', "martinwain2002@gmail.com")
     to_name = "Destinatario"
     subject = "hey there *names*"
     
-    # HTML content with template variables
+    # Contenido HTML con variables de plantilla
     html_content = "<p>Dear *names*,</p><p>Your score was *scores*</p><p>Thanks!</p>"
     
-    # Substitutions for template variables
+    # Sustituciones para variables de plantilla
     substitutions = {
         "*names*": "tere",
         "*scores*": "98"
     }
     
-    # Send email
-    print("Sending email...")
+    # Enviar email
+    print("📧 Enviando email...")
     result = email_service.send_email(
         from_email=from_email,
         to_email=to_email,
@@ -52,14 +50,14 @@ def main():
         substitutions=substitutions
     )
     
-    # Print result
+    # Mostrar resultado
     if result["success"]:
-        print("✅ Email sent successfully!")
-        print(f"Status code: {result['status_code']}")
+        print("✅ ¡Email enviado exitosamente!")
+        print(f"Código de estado: {result['status_code']}")
     else:
-        print("❌ Failed to send email")
-        print(f"Status code: {result['status_code']}")
-        print(f"Response: {result['response_text']}")
+        print("❌ Error al enviar email")
+        print(f"Código de estado: {result['status_code']}")
+        print(f"Respuesta: {result['response_text']}")
         if "error" in result:
             print(f"Error: {result['error']}")
 
