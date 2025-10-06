@@ -13,7 +13,7 @@ import bcrypt
 import requests
 import getpass
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from functools import wraps
@@ -127,7 +127,7 @@ def registrar_email_enviado(user_id, username, from_email, to_email, to_name, su
             'html_content': html_content,
             'provider_usado': provider_usado,
             'estado': estado,  # 'exitoso' o 'fallido'
-            'created_at': datetime.utcnow().isoformat()
+            'created_at': datetime.now(UTC).isoformat()
         }
         
         result = supabase.table('email_logs').insert(log_data).execute()
@@ -170,7 +170,7 @@ def contar_emails_enviados_hoy(user_id):
     """Contar emails enviados por el usuario hoy"""
     try:
         # Obtener fecha de hoy en formato ISO
-        hoy = datetime.utcnow().date().isoformat()
+        hoy = datetime.now(UTC).date().isoformat()
         
         # Buscar emails enviados hoy
         result = supabase.table('email_logs').select('id').eq('user_id', user_id).gte('created_at', hoy).execute()
@@ -185,7 +185,7 @@ def obtener_stats_diarias():
     """Obtener estadísticas de emails enviados hoy por todos los usuarios (solo admins)"""
     try:
         # Obtener fecha de hoy
-        hoy = datetime.utcnow().date().isoformat()
+        hoy = datetime.now(UTC).date().isoformat()
         
         # Obtener todos los emails enviados hoy agrupados por usuario
         result = supabase.table('email_logs').select('user_id, username').gte('created_at', hoy).execute()
@@ -230,8 +230,8 @@ def generar_token(username):
     """Generar token JWT"""
     payload = {
         'username': username,
-        'exp': datetime.utcnow() + timedelta(hours=1),  # ✅ PRODUCTION: 1 hora como especifica el challenge
-        'iat': datetime.utcnow()  # 📅 Fecha cuando se creó el token
+        'exp': datetime.now(UTC) + timedelta(hours=1),  # ✅ PRODUCTION: 1 hora como especifica el challenge
+        'iat': datetime.now(UTC)  # 📅 Fecha cuando se creó el token
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
@@ -392,13 +392,13 @@ def enviar_email():
         if not usuario:
             return jsonify({'error': 'Usuario no encontrado'}), 404
         
-        # Verificar límite diario (2 emails por día para testing)
+        # Verificar límite diario (100 emails por día)
         emails_enviados_hoy = contar_emails_enviados_hoy(usuario['id'])
-        if emails_enviados_hoy >= 2:
+        if emails_enviados_hoy >= 100:
             return jsonify({
                 'error': 'Límite diario alcanzado',
-                'mensaje': f'Has enviado {emails_enviados_hoy} emails hoy. Límite máximo: 2 emails por día.',
-                'limite_maximo': 2,
+                'mensaje': f'Has enviado {emails_enviados_hoy} emails hoy. Límite máximo: 100 emails por día.',
+                'limite_maximo': 100,
                 'emails_enviados_hoy': emails_enviados_hoy
             }), 429  # Too Many Requests
         
@@ -657,18 +657,16 @@ def enviar_email_interactivo(usuario_actual):
         print("📧 ENVIAR EMAIL")
         print("="*50)
         
-        # Verificar límite diario (2 emails por día para testing)
+        # Verificar límite diario (100 emails por día)
         emails_enviados_hoy = contar_emails_enviados_hoy(usuario_actual['id'])
-        if emails_enviados_hoy >= 2:
+        if emails_enviados_hoy >= 100:
             print(f"\n❌ LÍMITE DIARIO ALCANZADO")
             print(f"   Has enviado {emails_enviados_hoy} emails hoy")
-            print(f"   Límite máximo: 2 emails por día")
+            print(f"   Límite máximo: 100 emails por día")
             print(f"   Intenta mañana cuando se reinicie tu cuota")
             return
-        
-        print(f"\n📊 Emails enviados hoy: {emails_enviados_hoy}/2")
-        
-        # Datos del destinatario
+
+        print(f"\n📊 Emails enviados hoy: {emails_enviados_hoy}/100")        # Datos del destinatario
         print("\n📋 Datos del destinatario:")
         to_email = input("✉️  Email destino: ").strip()
         if not to_email:

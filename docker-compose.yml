@@ -1,0 +1,39 @@
+# version: '3.8'
+
+services:
+  email-service:
+    build: .
+    container_name: sirius-email-service
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+    env_file:
+      - .env
+    volumes:
+      # Montar solo el archivo .env para configuración
+      - ./.env:/app/.env:ro
+    stdin_open: true    # Habilitar entrada interactiva
+    tty: true          # Habilitar TTY para modo terminal
+    restart: unless-stopped
+    networks:
+      - email-network
+
+  # Servicio para modo API
+  email-api:
+    build: .
+    container_name: sirius-email-api
+    ports:
+      - "5001:5000"
+    environment:
+      - FLASK_ENV=production
+    env_file:
+      - .env
+    command: ["python", "app.py", "--api"]
+    restart: unless-stopped
+    networks:
+      - email-network
+
+networks:
+  email-network:
+    driver: bridge
