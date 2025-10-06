@@ -72,20 +72,22 @@ def buscar_usuario(username):
                 'username': username,
                 'email': user['email'],
                 'password': user['password_hash'],
-                'fecha_registro': user['created_at']
+                'fecha_registro': user['created_at'],
+                'admin': user.get('admin', False)
             }
         return None
     except Exception as e:
         print(f"❌ Error buscando usuario: {e}")
         return None
 
-def crear_usuario(username, email, password_hash):
+def crear_usuario(username, email, password_hash, admin=False):
     """Crear usuario en Supabase"""
     try:
         result = supabase.table('users').insert({
             'username': username,
             'email': email,
-            'password_hash': password_hash
+            'password_hash': password_hash,
+            'admin': admin
         }).execute()
         
         if result.data:
@@ -151,6 +153,71 @@ def obtener_historial_emails(user_id, limite=10):
         print(f"❌ Error obteniendo historial: {e}")
         return []
 
+def obtener_todos_los_emails(limite=50):
+    """Obtener historial de TODOS los emails enviados (solo para admins)"""
+    try:
+        result = supabase.table('email_logs').select('*').order('created_at', desc=True).limit(limite).execute()
+        
+        if result.data:
+            return result.data
+        return []
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo historial completo: {e}")
+        return []
+
+def contar_emails_enviados_hoy(user_id):
+    """Contar emails enviados por el usuario hoy"""
+    try:
+        # Obtener fecha de hoy en formato ISO
+        hoy = datetime.utcnow().date().isoformat()
+        
+        # Buscar emails enviados hoy
+        result = supabase.table('email_logs').select('id').eq('user_id', user_id).gte('created_at', hoy).execute()
+        
+        return len(result.data) if result.data else 0
+        
+    except Exception as e:
+        print(f"❌ Error contando emails de hoy: {e}")
+        return 0
+
+def obtener_stats_diarias():
+    """Obtener estadísticas de emails enviados hoy por todos los usuarios (solo admins)"""
+    try:
+        # Obtener fecha de hoy
+        hoy = datetime.utcnow().date().isoformat()
+        
+        # Obtener todos los emails enviados hoy agrupados por usuario
+        result = supabase.table('email_logs').select('user_id, username').gte('created_at', hoy).execute()
+        
+        if not result.data:
+            return []
+        
+        # Contar emails por usuario
+        stats_por_usuario = {}
+        for email_log in result.data:
+            user_id = email_log['user_id']
+            username = email_log['username']
+            
+            if user_id not in stats_por_usuario:
+                stats_por_usuario[user_id] = {
+                    'user_id': user_id,
+                    'username': username,
+                    'emails_sent_today': 0
+                }
+            
+            stats_por_usuario[user_id]['emails_sent_today'] += 1
+        
+        # Convertir a lista y ordenar por cantidad de emails
+        stats_list = list(stats_por_usuario.values())
+        stats_list.sort(key=lambda x: x['emails_sent_today'], reverse=True)
+        
+        return stats_list
+        
+    except Exception as e:
+        print(f"❌ Error obteniendo estadísticas: {e}")
+        return []
+
 def encriptar_password(password):
     """Encriptar contraseña"""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -163,7 +230,7 @@ def generar_token(username):
     """Generar token JWT"""
     payload = {
         'username': username,
-        'exp': datetime.utcnow() + timedelta(hours=1),  # ⏰ CAMBIAR AQUÍ: hours=1 (1 hora)
+        'exp': datetime.utcnow() + timedelta(hours=1),  # ✅ PRODUCTION: 1 hora como especifica el challenge
         'iat': datetime.utcnow()  # 📅 Fecha cuando se creó el token
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
@@ -177,6 +244,22 @@ def verificar_token(token):
         return False, "Token expirado"
     except jwt.InvalidTokenError:
         return False, "Token inválido"
+
+def verificar_sesion_activa(token):
+    """Verificar si la sesión está activa (para modo terminal)"""
+    valido, resultado = verificar_token(token)
+    if not valido:
+        print(f"\n❌ SESIÓN EXPIRADA: {resultado}")
+        print("🔄 Serás redirigido al login...")
+        return None
+    
+    # Obtener datos del usuario desde la base de datos
+    usuario = buscar_usuario(resultado)
+    if not usuario:
+        print("\n❌ Error: Usuario no encontrado")
+        return None
+    
+    return usuario
 
 # Decorador para rutas protegidas
 def login_requerido(f):
@@ -218,6 +301,7 @@ def registro():
         username = datos['username'].strip()
         email = datos['email'].strip()
         password = datos['password']
+        admin = datos.get('admin', False)  # Campo opcional, por defecto False
         
         if len(username) < 3:
             return jsonify({'error': 'Username debe tener al menos 3 caracteres'}), 400
@@ -232,12 +316,12 @@ def registro():
         
         # Crear usuario
         password_hash = encriptar_password(password)
-        exito, resultado = crear_usuario(username, email, password_hash)
+        exito, resultado = crear_usuario(username, email, password_hash, admin=admin)
         
         if exito:
             return jsonify({
                 'mensaje': 'Usuario registrado exitosamente',
-                'usuario': {'username': username, 'email': email}
+                'usuario': {'username': username, 'email': email, 'admin': admin}
             }), 201
         else:
             return jsonify({'error': f'Error al registrar: {resultado}'}), 500
@@ -290,7 +374,8 @@ def perfil():
             'usuario': {
                 'username': request.usuario_actual,
                 'email': usuario['email'],
-                'fecha_registro': usuario['fecha_registro']
+                'fecha_registro': usuario['fecha_registro'],
+                'admin': usuario.get('admin', False)
             }
         })
         
@@ -302,6 +387,21 @@ def perfil():
 def enviar_email():
     """Enviar email con soporte para múltiples proveedores (requiere autenticación)"""
     try:
+        # Buscar información del usuario actual
+        usuario = buscar_usuario(request.usuario_actual)
+        if not usuario:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
+        
+        # Verificar límite diario (2 emails por día para testing)
+        emails_enviados_hoy = contar_emails_enviados_hoy(usuario['id'])
+        if emails_enviados_hoy >= 2:
+            return jsonify({
+                'error': 'Límite diario alcanzado',
+                'mensaje': f'Has enviado {emails_enviados_hoy} emails hoy. Límite máximo: 2 emails por día.',
+                'limite_maximo': 2,
+                'emails_enviados_hoy': emails_enviados_hoy
+            }), 429  # Too Many Requests
+        
         datos = request.get_json()
         
         campos_requeridos = ['to_email', 'to_name', 'subject', 'html_content']
@@ -347,6 +447,39 @@ def enviar_email():
             
     except Exception as e:
         return jsonify({'error': f'Error al enviar email: {str(e)}'}), 500
+
+@app.route('/stats', methods=['GET'])
+@login_requerido
+def stats():
+    """Obtener estadísticas de emails enviados hoy (solo para administradores)"""
+    try:
+        # Buscar información del usuario actual
+        usuario = buscar_usuario(request.usuario_actual)
+        if not usuario:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
+        
+        # Verificar si el usuario es administrador
+        if not usuario.get('admin', False):
+            return jsonify({
+                'error': 'Acceso denegado',
+                'mensaje': 'Solo los administradores pueden acceder a las estadísticas'
+            }), 403  # Forbidden
+        
+        # Obtener estadísticas de emails enviados hoy
+        stats_diarias = obtener_stats_diarias()
+        
+        # Crear lista simple como pide el challenge: usuario y cantidad de emails
+        usuarios_stats = []
+        for stat in stats_diarias:
+            usuarios_stats.append({
+                'username': stat['username'],
+                'emails_sent_today': stat['emails_sent_today']
+            })
+        
+        return jsonify(usuarios_stats)
+        
+    except Exception as e:
+        return jsonify({'error': f'Error al obtener estadísticas: {str(e)}'}), 500
 
 # Manejadores de error
 @app.errorhandler(404)
@@ -395,6 +528,18 @@ def registro_terminal():
             print("❌ Las contraseñas no coinciden")
             return False
         
+        # Preguntar si quiere ser admin
+        while True:
+            admin_input = input("👑 ¿Quieres ser administrador? (s/n): ").strip().lower()
+            if admin_input in ['s', 'si', 'sí', 'y', 'yes']:
+                es_admin = True
+                break
+            elif admin_input in ['n', 'no']:
+                es_admin = False
+                break
+            else:
+                print("❌ Responde 's' para sí o 'n' para no")
+        
         # Verificar si usuario ya existe
         existe, mensaje = verificar_usuario_existe(username, email)
         if existe:
@@ -404,11 +549,12 @@ def registro_terminal():
         # Crear usuario
         print("\n🚀 Creando usuario...")
         password_hash = encriptar_password(password)
-        exito, resultado = crear_usuario(username, email, password_hash)
+        exito, resultado = crear_usuario(username, email, password_hash, admin=es_admin)
         
         if exito:
             print(f"\n✅ ¡Usuario {username} registrado exitosamente!")
             print(f"📧 Email: {email}")
+            print(f"👑 Admin: {'Sí' if es_admin else 'No'}")
             print("🔑 Ya puedes iniciar sesión")
             return True
         else:
@@ -436,9 +582,9 @@ def menu_inicial():
             opcion = input("\n🔢 Selecciona una opción (1-3): ").strip()
             
             if opcion == "1":
-                usuario = login_terminal()
-                if usuario:
-                    return usuario
+                token = login_terminal()
+                if token:
+                    return token
             elif opcion == "2":
                 registro_terminal()
                 print("\n✅ Usuario registrado. Ahora puedes iniciar sesión.")
@@ -488,10 +634,12 @@ def login_terminal():
                 print("❌ Usuario o contraseña incorrectos")
                 continue
             
-            # Login exitoso
+            # Login exitoso - generar token JWT
+            token = generar_token(username)
             print(f"\n✅ ¡Bienvenido/a {username}!")
             print(f"📧 Email configurado: {usuario['email']}")
-            return usuario
+            print(f"🔐 Sesión válida por 1 hora")
+            return token
             
         except KeyboardInterrupt:
             print("\n\n👋 Proceso cancelado por el usuario")
@@ -508,6 +656,17 @@ def enviar_email_interactivo(usuario_actual):
         print("\n" + "="*50)
         print("📧 ENVIAR EMAIL")
         print("="*50)
+        
+        # Verificar límite diario (2 emails por día para testing)
+        emails_enviados_hoy = contar_emails_enviados_hoy(usuario_actual['id'])
+        if emails_enviados_hoy >= 2:
+            print(f"\n❌ LÍMITE DIARIO ALCANZADO")
+            print(f"   Has enviado {emails_enviados_hoy} emails hoy")
+            print(f"   Límite máximo: 2 emails por día")
+            print(f"   Intenta mañana cuando se reinicie tu cuota")
+            return
+        
+        print(f"\n📊 Emails enviados hoy: {emails_enviados_hoy}/2")
         
         # Datos del destinatario
         print("\n📋 Datos del destinatario:")
@@ -614,73 +773,107 @@ def mostrar_perfil(usuario_actual):
         print(f"👤 Usuario: {usuario_db.get('username', usuario_actual.get('username', 'N/A'))}")
         print(f"📧 Email: {usuario_db['email']}")
         print(f"📅 Registrado: {usuario_db.get('fecha_registro', 'N/A')}")
+        print(f"👑 Admin: {'Sí' if usuario_db.get('admin', False) else 'No'}")
     else:
         print(f"👤 Usuario: {usuario_actual.get('username', 'N/A')}")
         print(f"📧 Email: {usuario_actual['email']}")
         print(f"📅 Registrado: {usuario_actual.get('fecha_registro', 'N/A')}")
+        print(f"👑 Admin: {'Sí' if usuario_actual.get('admin', False) else 'No'}")
     
     print(f"🔧 Proveedores: {', '.join(email_service.get_available_providers())}")
 
 def mostrar_historial_emails(usuario_actual):
     """Mostrar historial de emails enviados"""
     print("\n" + "="*50)
-    print("📜 HISTORIAL DE EMAILS ENVIADOS")
-    print("="*50)
     
-    try:
-        # Obtener historial del usuario
-        historial = obtener_historial_emails(usuario_actual['id'], limite=20)
+    # Verificar si es admin para mostrar estadísticas o historial detallado
+    es_admin = usuario_actual.get('admin', False)
+    
+    if es_admin:
+        print("� ESTADÍSTICAS DE EMAILS (ADMIN)")
+        print("="*50)
+        print("👑 Modo Administrador: Emails enviados por usuario")
         
-        if not historial:
-            print("\n📭 No hay emails en el historial")
-            return
+        try:
+            # Obtener estadísticas de emails enviados hoy
+            stats_diarias = obtener_stats_diarias()
+            
+            if not stats_diarias:
+                print("\n📭 No hay emails enviados hoy")
+                return
+            
+            print(f"\n📈 Usuarios que enviaron emails hoy:")
+            print("-" * 40)
+            
+            for i, stat in enumerate(stats_diarias, 1):
+                print(f"{i}. 👤 Usuario: {stat['username']} - 📧 Emails: {stat['emails_sent_today']}")
+                
+        except Exception as e:
+            print(f"❌ Error al obtener estadísticas: {e}")
+    else:
+        print("� HISTORIAL DE EMAILS ENVIADOS")
+        print("="*50)
         
-        print(f"\n📊 Últimos {len(historial)} emails enviados:")
-        print("-" * 80)
-        
-        for i, email in enumerate(historial, 1):
-            # Formatear fecha
-            try:
-                fecha_str = email['created_at']
-                if 'T' in fecha_str:
-                    fecha_formateada = fecha_str.split('T')[0] + ' ' + fecha_str.split('T')[1][:8]
-                else:
-                    fecha_formateada = fecha_str
-            except:
-                fecha_formateada = email.get('created_at', 'N/A')
+        try:
+            # Para usuarios normales, mostrar su historial detallado
+            historial = obtener_historial_emails(usuario_actual['id'], limite=20)
             
-            # Estado con emoji
-            estado_emoji = "✅" if email['estado'] == 'exitoso' else "❌"
+            if not historial:
+                print("\n� No hay emails en tu historial")
+                return
             
-            print(f"\n{i}. {estado_emoji} {email['estado'].upper()}")
-            print(f"   📅 Fecha: {fecha_formateada}")
-            print(f"   📧 Para: {email['to_email']}")
-            print(f"   📌 Asunto: {email['subject']}")
-            print(f"   🔧 Proveedor: {email['provider_usado']}")
+            print(f"\n📊 Últimos {len(historial)} emails enviados:")
+            print("-" * 80)
             
-            # Mostrar contenido (truncado)
-            content = email.get('html_content', '')
-            if len(content) > 100:
-                content = content[:100] + "..."
-            print(f"   📄 Contenido: {content}")
-            
-        print("\n" + "="*50)
-        
-    except Exception as e:
-        print(f"❌ Error al obtener historial: {e}")
+            for i, email in enumerate(historial, 1):
+                # Formatear fecha
+                try:
+                    fecha_str = email['created_at']
+                    if 'T' in fecha_str:
+                        fecha_formateada = fecha_str.split('T')[0] + ' ' + fecha_str.split('T')[1][:8]
+                    else:
+                        fecha_formateada = fecha_str
+                except:
+                    fecha_formateada = email.get('created_at', 'N/A')
+                
+                # Estado con emoji
+                estado_emoji = "✅" if email['estado'] == 'exitoso' else "❌"
+                
+                print(f"\n{i}. {estado_emoji} {email['estado'].upper()}")
+                print(f"   📅 Fecha: {fecha_formateada}")
+                print(f"   📧 Para: {email['to_email']}")
+                print(f"   📌 Asunto: {email['subject']}")
+                print(f"   🔧 Proveedor: {email['provider_usado']}")
+                
+                # Mostrar contenido (truncado)
+                content = email.get('html_content', '')
+                if len(content) > 100:
+                    content = content[:100] + "..."
+                print(f"   📄 Contenido: {content}")
+                
+        except Exception as e:
+            print(f"❌ Error al obtener historial: {e}")
+    
+    print("\n" + "="*50)
 
-def menu_principal(usuario_actual):
-    """Menú principal interactivo"""
+def menu_principal(token_jwt):
+    """Menú principal interactivo con verificación JWT"""
     while True:
         try:
-            print("\n" + "="*50)
-            print("📧 SISTEMA DE EMAIL - MENÚ PRINCIPAL")
-            print("="*50)
-            print("1. 📧 Enviar email")
-            print("2. 👤 Ver perfil")
-            print("3. � Ver historial de emails")
-            print("4. �👋 Salir")
+            # Verificar token en cada iteración del menú
+            usuario_actual = verificar_sesion_activa(token_jwt)
+            if not usuario_actual:
+                # Token expirado - volver al login
+                print("\n🔄 Redirigiendo al menú de login...")
+                return
             
+            print("\n" + "="*50)
+            print("SISTEMA DE EMAIL - MENÚ PRINCIPAL")
+            print("="*50)
+            print("1. Enviar email")
+            print("2. Ver perfil")
+            print("3. Ver estadísticas de emails (ADMIN)")
+            print("4. Salir")
             opcion = input("\n🔢 Selecciona una opción (1-4): ").strip()
             
             if opcion == "1":
@@ -688,7 +881,16 @@ def menu_principal(usuario_actual):
             elif opcion == "2":
                 mostrar_perfil(usuario_actual)
             elif opcion == "3":
-                mostrar_historial_emails(usuario_actual)
+                # Verificar si es admin antes de mostrar estadísticas
+                if usuario_actual.get('admin', False):
+                    mostrar_historial_emails(usuario_actual)
+                else:
+                    print("\n" + "="*50)
+                    print("❌ ERROR 403 - ACCESO DENEGADO")
+                    print("="*50)
+                    print("🚫 Solo los administradores pueden acceder a las estadísticas")
+                    print("💡 Contacta a un administrador si necesitas esta información")
+                    print("="*50)
             elif opcion == "4":
                 print("\n👋 ¡Hasta luego!")
                 sys.exit(0)
@@ -702,15 +904,25 @@ def menu_principal(usuario_actual):
             print(f"❌ Error: {e}")
 
 def modo_interactivo():
-    """Modo interactivo principal"""
+    """Modo interactivo principal con verificación JWT"""
     print("🚀 INICIANDO MODO INTERACTIVO")
     print("Conectando a servicios...")
     
-    # Menú inicial (Login o Registro)
-    usuario_actual = menu_inicial()
-    
-    # Menú principal
-    menu_principal(usuario_actual)
+    # Loop principal - manejar expiración de token
+    while True:
+        try:
+            # Menú inicial (Login o Registro)
+            token_jwt = menu_inicial()
+            
+            # Menú principal (se sale si el token expira)
+            menu_principal(token_jwt)
+            
+        except KeyboardInterrupt:
+            print("\n\n👋 ¡Hasta luego!")
+            sys.exit(0)
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            print("🔄 Reiniciando sistema...")
 
 if __name__ == '__main__':
     import sys
@@ -722,7 +934,8 @@ if __name__ == '__main__':
         print("   POST /registro - Registrar usuario")
         print("   POST /login - Iniciar sesión")
         print("   GET  /perfil - Ver perfil (requiere token)")
-        print("   POST /enviar-email - Enviar email (requiere token)")
+        print("   POST /enviar-email - Enviar email (requiere token, límite 2/día)")
+        print("   GET  /stats - Estadísticas diarias (solo admins)")
         print("   GET  /health - Verificar API")
         print(f"🌐 Servidor corriendo en: http://localhost:5000")
         
