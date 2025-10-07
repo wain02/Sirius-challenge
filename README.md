@@ -39,6 +39,13 @@ docker exec -it sirius-email-service bash
 python app.py
 ```
 
+## Tests
+
+```bash
+./run_simple_tests.sh
+```
+
+
 ## Estructura del Proyecto
 ```
 ├── app.py              # Aplicación principal
