@@ -4,18 +4,18 @@ Servicio de email con autenticación JWT y sistema interactivo por terminal.
 
 ## Configuración Local
 
-### 2. Crear entorno virtual
+### 1. Crear entorno virtual
 ```bash
 python3 -m venv venv
 source venv/bin/activate  
 ```
 
-### 3. Instalar dependencias
+### 2. Instalar dependencias
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. Ejecutar la aplicación
+### 3. Ejecutar la aplicación
 ```bash
 python app.py
 ```
